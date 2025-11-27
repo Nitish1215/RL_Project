@@ -1,154 +1,339 @@
-# train.py  (diagnostic + training)
-import os, time, random, argparse
+# train.py - Improved training script with proper metrics tracking
+import os
+import time
+import random
+import argparse
 import numpy as np
 import torch
 
-from grid_env import ComplexGridEnv as GridEnv        # your fixed grid_env.py
-from dqn_agent import DQNAgent      # your DQN agent (with train_step returning loss)
+from grid_env import ComplexGridEnv as GridEnv
+from dqn_agent import DQNAgent
+from config import Config
+from utils import setup_logger, MetricsTracker, save_checkpoint, load_checkpoint
+from evaluate import evaluate_agent
 
-def train(episodes=600, grid_size=10, obstacle_prob=0.3,
-          render_every=0, save_frames=False, seed=0):
-    # reproducibility
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
 
-    # create env and agent
-    env = GridEnv(size=grid_size, obstacle_prob=obstacle_prob, max_steps=80, seed=seed)
+def train(config: Config = None, resume_from: str = None):
+    """
+    Train DQN agent with comprehensive metrics tracking and evaluation.
+    
+    Args:
+        config: Configuration object
+        resume_from: Path to checkpoint to resume training from
+    """
+    if config is None:
+        config = Config()
+    
+    # Setup directories
+    for dir_path in [config.training.MODEL_DIR, config.training.FRAME_DIR, 
+                     config.training.LOG_DIR, config.training.RESULTS_DIR]:
+        os.makedirs(dir_path, exist_ok=True)
+    
+    # Setup logging
+    log_file = os.path.join(config.training.LOG_DIR, 'training.log')
+    logger = setup_logger('training', log_file)
+    
+    # Set random seeds
+    random.seed(config.training.SEED)
+    np.random.seed(config.training.SEED)
+    torch.manual_seed(config.training.SEED)
+    
+    # Create environment and agent
+    env = GridEnv(
+        size=config.env.GRID_SIZE,
+        obstacle_prob=config.env.OBSTACLE_PROB,
+        n_moving=config.env.N_MOVING_OBSTACLES,
+        local_view=config.env.LOCAL_VIEW_RADIUS,
+        max_steps=config.env.MAX_STEPS,
+        seed=config.training.SEED
+    )
+    
     obs_dim = env.observation_space_dim
     n_actions = env.action_space_n
-
-    # create agent with smaller warmup thresholds to ensure training starts quickly
-    agent = DQNAgent(obs_dim, n_actions, lr=5e-4, device=None)
-    # tune agent internals if present (safe-guard)
+    
+    # Create agent with config parameters
+    agent = DQNAgent(
+        obs_dim=obs_dim,
+        n_actions=n_actions,
+        lr=config.dqn.LEARNING_RATE,
+        gamma=config.dqn.GAMMA,
+        hidden_layers=config.dqn.HIDDEN_LAYERS,
+        use_dueling=config.dqn.USE_DUELING,
+        replay_size=config.dqn.REPLAY_BUFFER_SIZE,
+        batch_size=config.dqn.BATCH_SIZE,
+        min_replay=config.dqn.MIN_REPLAY_SIZE,
+        target_update=config.dqn.TARGET_UPDATE_FREQUENCY,
+        gradient_clip=config.dqn.GRADIENT_CLIP,
+        device=config.dqn.DEVICE
+    )
+    
+    logger.info("="*60)
+    logger.info("TRAINING CONFIGURATION")
+    logger.info("="*60)
+    logger.info(f"Device: {agent.device}")
+    logger.info(f"Observation dim: {obs_dim}, Action space: {n_actions}")
+    logger.info(f"Network: {'Dueling DQN' if config.dqn.USE_DUELING else 'Standard DQN'}")
+    logger.info(f"Hidden layers: {config.dqn.HIDDEN_LAYERS}")
+    logger.info(f"Replay buffer: {config.dqn.REPLAY_BUFFER_SIZE}, Min replay: {config.dqn.MIN_REPLAY_SIZE}")
+    logger.info(f"Batch size: {config.dqn.BATCH_SIZE}, Target update: {config.dqn.TARGET_UPDATE_FREQUENCY}")
+    logger.info(f"Episodes: {config.training.NUM_EPISODES}")
+    logger.info("="*60)
+    
+    # Initialize metrics tracker
+    metrics_path = os.path.join(config.training.RESULTS_DIR, config.training.METRICS_FILE)
+    metrics = MetricsTracker(save_path=metrics_path if config.training.SAVE_METRICS else None)
+    
+    # Exploration parameters
+    epsilon = config.dqn.EPSILON_START
+    start_episode = 1
+    
+    # Resume from checkpoint if specified
+    if resume_from:
+        logger.info(f"Resuming training from {resume_from}")
+        checkpoint_data = load_checkpoint(agent, resume_from, load_replay=True)
+        start_episode = checkpoint_data['episode'] + 1
+        epsilon = checkpoint_data['epsilon']
+        
+        # Restore metrics if available
+        if 'metrics' in checkpoint_data:
+            metrics_data = checkpoint_data['metrics']
+            metrics.episode_rewards = metrics_data.get('episode_rewards', [])
+            metrics.episode_lengths = metrics_data.get('episode_lengths', [])
+            metrics.episode_successes = metrics_data.get('episode_successes', [])
+            metrics.losses = metrics_data.get('losses', [])
+        
+        logger.info(f"Resumed from episode {start_episode}, epsilon={epsilon:.3f}")
+    
+    # Best model tracking (using actual rewards now!)
+    best_avg_reward = -float('inf')
+    
+    # Training loop
+    logger.info("Starting training...")
+    training_start_time = time.time()
+    
     try:
-        # lower min_replay and batch size to start training quickly
-        agent.min_replay = min(100, getattr(agent, "min_replay", 100))
-        agent.batch_size = min(32, getattr(agent, "batch_size", 32))
-        agent.target_update = getattr(agent, "target_update", 500)
-    except Exception:
-        pass
-
-    print(f"[INFO] Device: {agent.device}")
-    print(f"[INFO] obs_dim={obs_dim}, n_actions={n_actions}")
-    print(f"[INFO] agent.batch_size={agent.batch_size}, agent.min_replay={agent.min_replay}, target_update={agent.target_update}")
-
-    eps = 1.0; eps_min = 0.05; eps_decay = 0.995
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("frames", exist_ok=True)
-
-    replay_sizes = []
-    losses = []
-    best_avg = -1e9
-    train_calls = 0
-
-    try:
-        for ep in range(1, episodes+1):
-            # Increase grid size and complexity for training
-            dynamic_grid_size = random.randint(grid_size, grid_size + 6)  # Larger grid
-            dynamic_obstacle_prob = random.uniform(obstacle_prob, obstacle_prob + 0.15)  # Higher obstacle probability
-            dynamic_n_moving = random.randint(5, 8)  # More moving obstacles
-            env = GridEnv(size=dynamic_grid_size, obstacle_prob=dynamic_obstacle_prob, n_moving=dynamic_n_moving, max_steps=300, seed=seed)
-
-            s = env.reset()
+        for episode in range(start_episode, config.training.NUM_EPISODES + 1):
+            # Create dynamic environment for this episode
+            if config.env.CURRICULUM_ENABLED:
+                # Simple curriculum: gradually increase difficulty
+                progress = (episode - 1) / config.training.NUM_EPISODES
+                dynamic_size = int(config.env.GRID_SIZE + progress * 5)
+                dynamic_obstacle_prob = config.env.OBSTACLE_PROB + progress * 0.1
+                dynamic_n_moving = config.env.N_MOVING_OBSTACLES + int(progress * 3)
+            else:
+                # Random variation
+                size_offset = random.randint(*config.env.DYNAMIC_SIZE_RANGE)
+                dynamic_size = config.env.GRID_SIZE + size_offset
+                
+                obstacle_offset = random.uniform(*config.env.DYNAMIC_OBSTACLE_RANGE)
+                dynamic_obstacle_prob = config.env.OBSTACLE_PROB + obstacle_offset
+                
+                dynamic_n_moving = random.randint(*config.env.DYNAMIC_MOVING_RANGE)
+            
+            env = GridEnv(
+                size=dynamic_size,
+                obstacle_prob=dynamic_obstacle_prob,
+                n_moving=dynamic_n_moving,
+                max_steps=config.env.MAX_STEPS,
+                seed=config.training.SEED + episode
+            )
+            
+            # Episode execution
+            state = env.reset()
             done = False
-            ep_reward = 0.0
-            step = 0
-
-            # frame saving directory if requested
+            episode_reward = 0.0
+            episode_steps = 0
+            
+            # Frame saving setup if needed
             save_dir = None
-            do_render = (render_every > 0) and (ep % render_every == 0)
-            if do_render and save_frames:
-                save_dir = os.path.join("frames", f"ep{ep:04d}")
+            do_render = (config.training.RENDER_FREQUENCY > 0 and 
+                        episode % config.training.RENDER_FREQUENCY == 0)
+            if do_render and config.training.SAVE_FRAMES:
+                save_dir = os.path.join(config.training.FRAME_DIR, f"ep{episode:04d}")
                 os.makedirs(save_dir, exist_ok=True)
-
+            
+            # Episode loop
             while not done:
-                a = agent.act(s, eps)
-                s2, r, done, _ = env.step(a)
-
-                # store & train every step
-                agent.store(s, a, r, s2, done)
-
-                # call train_step and capture loss
+                action = agent.act(state, epsilon)
+                next_state, reward, done, _ = env.step(action)
+                
+                # Store transition
+                agent.store(state, action, reward, next_state, done)
+                
+                # Train agent
                 loss = agent.train_step()
                 if loss is not None:
-                    train_calls += 1
-                    losses.append(loss)
-
-                s = s2
-                ep_reward += r
-                step += 1
-
-                # render/save if needed (non-blocking)
+                    metrics.add_loss(loss)
+                
+                state = next_state
+                episode_reward += reward
+                episode_steps += 1
+                
+                # Rendering
                 if do_render:
                     env.render(show=True)
-                    if save_frames and save_dir:
-                        fname = os.path.join(save_dir, f"step{step:04d}.png")
+                    if config.training.SAVE_FRAMES and save_dir:
+                        fname = os.path.join(save_dir, f"step{episode_steps:04d}.png")
                         env.render(show=False, save_path=fname)
-                    # small pause so rendering doesn't starve cpu (adjustable)
                     time.sleep(0.005)
-
-            replay_size = len(getattr(agent, "replay", []))
-            replay_sizes.append(replay_size)
-            eps = max(eps_min, eps * eps_decay)
-
-            avg50 = np.mean(replay_sizes[-50:]) if len(replay_sizes) >= 1 else replay_size
-            avg_loss = np.mean(losses[-100:]) if len(losses) > 0 else float("nan")
-            recent_reward_avg = None
-            # compute rolling reward avg (last 50)
-            try:
-                # we don't store all rewards list globally; print ep reward and avg of last 10 via sliding window (simple)
-                pass
-            except Exception:
-                pass
-
-            # Print helpful diagnostic every episode and a richer summary every 10 episodes
-            if ep % 1 == 0:
-                print(f"Ep {ep:03d} | steps {step:02d} | ep_reward {ep_reward:6.2f} | replay {replay_size:04d} | train_calls {train_calls} | last_loss {losses[-1]:.4f}" if losses else f"Ep {ep:03d} | steps {step:02d} | ep_reward {ep_reward:6.2f} | replay {replay_size:04d} | train_calls {train_calls} | last_loss None")
-
-            if ep % 10 == 0:
-                print(f"--- summary @ep {ep:03d} avg_lastloss {avg_loss:.4f} eps {eps:.3f} ---")
-
-            # save best by training loss or reward heuristics if you prefer
-            # here we save periodic checkpoints
-            if ep % 200 == 0:
-                torch.save(agent.policy.state_dict(), f"models/dqn_ep{ep}.pt")
-                print(f"[INFO] saved checkpoint models/dqn_ep{ep}.pt")
-
-            # Save the best model based on average reward
-            if ep % 10 == 0:
-                recent_rewards = replay_sizes[-10:]  # Use the last 10 episodes' rewards
+            
+            # Check if episode was successful
+            success = (env.agent == env.goal)
+            
+            # Update metrics
+            replay_size = len(agent.replay)
+            stats = metrics.add_episode(
+                episode=episode,
+                reward=episode_reward,
+                length=episode_steps,
+                success=success,
+                epsilon=epsilon,
+                replay_size=replay_size
+            )
+            
+            # Decay epsilon
+            epsilon = max(config.dqn.EPSILON_END, epsilon * config.dqn.EPSILON_DECAY)
+            
+            # Logging
+            if episode % config.training.LOG_FREQUENCY == 0:
+                logger.info(
+                    f"Ep {episode:04d} | Reward: {episode_reward:7.2f} | "
+                    f"Steps: {episode_steps:3d} | Success: {success} | "
+                    f"Replay: {replay_size:5d} | ε: {epsilon:.3f}"
+                )
+            
+            # Detailed summary
+            if episode % config.training.SUMMARY_FREQUENCY == 0:
+                logger.info("-" * 60)
+                logger.info(f"Summary at Episode {episode}:")
+                logger.info(f"  Avg Reward (last 100):  {stats['avg_reward']:.2f}")
+                logger.info(f"  Avg Length (last 100):  {stats['avg_length']:.1f}")
+                logger.info(f"  Success Rate (last 100): {stats['success_rate']:.1f}%")
+                logger.info(f"  Avg Loss (last 100):    {stats['avg_loss']:.4f}")
+                logger.info(f"  Epsilon: {epsilon:.3f}")
+                logger.info("-" * 60)
+            
+            # Evaluation
+            if config.training.EVAL_FREQUENCY > 0 and episode % config.training.EVAL_FREQUENCY == 0:
+                logger.info("Running evaluation...")
+                eval_results = evaluate_agent(
+                    agent,
+                    n_episodes=config.training.EVAL_EPISODES,
+                    grid_size=config.env.GRID_SIZE,
+                    obstacle_prob=config.env.OBSTACLE_PROB,
+                    epsilon=config.training.EVAL_EPSILON,
+                    seed=config.training.SEED + 10000
+                )
+                logger.info(f"  Eval Mean Reward: {eval_results['mean_reward']:.2f}")
+                logger.info(f"  Eval Success Rate: {eval_results['success_rate']:.1f}%")
+            
+            # Save best model (FIXED: using actual average reward!)
+            if episode % config.training.BEST_MODEL_CHECK_FREQUENCY == 0:
+                recent_rewards = metrics.episode_rewards[-100:]  # Last 100 episodes
                 avg_reward = np.mean(recent_rewards) if recent_rewards else -float('inf')
-                if avg_reward > best_avg:
-                    best_avg = avg_reward
-                    torch.save(agent.policy.state_dict(), "models/dqn_best.pt")
-                    print(f"[INFO] New best model saved with avg reward {best_avg:.2f} at models/dqn_best.pt")
-
-            # close renderer for this episode if opened
+                
+                if avg_reward > best_avg_reward:
+                    best_avg_reward = avg_reward
+                    best_path = os.path.join(config.training.MODEL_DIR, "dqn_best.pt")
+                    torch.save(agent.policy.state_dict(), best_path)
+                    logger.info(f"  ★ New best model! Avg reward: {best_avg_reward:.2f} → {best_path}")
+            
+            # Periodic checkpoints
+            if episode % config.training.CHECKPOINT_FREQUENCY == 0:
+                checkpoint_path = os.path.join(config.training.MODEL_DIR, f"checkpoint_ep{episode}.pt")
+                save_checkpoint(agent, episode, metrics, epsilon, checkpoint_path)
+                logger.info(f"  Checkpoint saved: {checkpoint_path}")
+            
+            # Close renderer if opened
             if do_render:
                 env.close_renderer()
-
+    
+    except KeyboardInterrupt:
+        logger.info("\nTraining interrupted by user")
+    
     finally:
         try:
             env.close_renderer()
-        except Exception:
+        except:
             pass
+        
+        # Final save
+        final_path = os.path.join(config.training.MODEL_DIR, "dqn_final.pt")
+        torch.save(agent.policy.state_dict(), final_path)
+        
+        final_checkpoint = os.path.join(config.training.MODEL_DIR, "checkpoint_final.pt")
+        save_checkpoint(agent, episode, metrics, epsilon, final_checkpoint)
+        
+        logger.info(f"\nFinal model saved: {final_path}")
+        logger.info(f"Final checkpoint saved: {final_checkpoint}")
+        
+        # Training summary
+        training_time = time.time() - training_start_time
+        logger.info("\n" + "="*60)
+        logger.info("TRAINING COMPLETED")
+        logger.info("="*60)
+        logger.info(f"Total episodes: {len(metrics.episode_rewards)}")
+        logger.info(f"Training time: {training_time/3600:.2f} hours")
+        logger.info(f"Best avg reward: {best_avg_reward:.2f}")
+        
+        final_stats = metrics.get_stats()
+        logger.info(f"Final avg reward: {final_stats['avg_reward']:.2f}")
+        logger.info(f"Final success rate: {final_stats['success_rate']:.1f}%")
+        logger.info(f"Total successes: {final_stats['total_successes']}")
+        logger.info("="*60)
+        
+        # Plot training curves
+        if config.training.SAVE_METRICS:
+            plot_path = os.path.join(config.training.RESULTS_DIR, "training_curves.png")
+            metrics.plot_training_curves(plot_path)
+            logger.info(f"Training curves saved: {plot_path}")
 
-    # final save
-    torch.save(agent.policy.state_dict(), "models/dqn_final.pt")
-    print("[INFO] Training finished. Total train calls:", train_calls)
+
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=600)
-    parser.add_argument("--grid-size", type=int, default=10)
-    parser.add_argument("--obstacle-prob", type=float, default=0.5)
-    parser.add_argument("--render-every", type=int, default=100)
-    parser.add_argument("--save-frames", action="store_true")
-    parser.add_argument("--seed", type=int, default=0)
+    parser = argparse.ArgumentParser(description="Train DQN agent on Grid Navigation")
+    parser.add_argument("--episodes", type=int, default=None,
+                       help="Number of training episodes (default: from config)")
+    parser.add_argument("--grid-size", type=int, default=None,
+                       help="Grid size (default: from config)")
+    parser.add_argument("--obstacle-prob", type=float, default=None,
+                       help="Obstacle probability (default: from config)")
+    parser.add_argument("--render-every", type=int, default=None,
+                       help="Render every N episodes (default: from config)")
+    parser.add_argument("--save-frames", action="store_true",
+                       help="Save rendered frames")
+    parser.add_argument("--seed", type=int, default=None,
+                       help="Random seed (default: from config)")
+    parser.add_argument("--resume", type=str, default=None,
+                       help="Path to checkpoint to resume training from")
+    parser.add_argument("--no-dueling", action="store_true",
+                       help="Disable Dueling DQN architecture")
+    parser.add_argument("--eval-freq", type=int, default=None,
+                       help="Evaluation frequency in episodes")
+    
     args = parser.parse_args()
+    
+    # Load config and override with command line args
+    config = Config()
+    
+    if args.episodes is not None:
+        config.training.NUM_EPISODES = args.episodes
+    if args.grid_size is not None:
+        config.env.GRID_SIZE = args.grid_size
+    if args.obstacle_prob is not None:
+        config.env.OBSTACLE_PROB = args.obstacle_prob
+    if args.render_every is not None:
+        config.training.RENDER_FREQUENCY = args.render_every
+    if args.save_frames:
+        config.training.SAVE_FRAMES = True
+    if args.seed is not None:
+        config.training.SEED = args.seed
+    if args.no_dueling:
+        config.dqn.USE_DUELING = False
+    if args.eval_freq is not None:
+        config.training.EVAL_FREQUENCY = args.eval_freq
+    
+    # Run training
+    train(config=config, resume_from=args.resume)
 
-    train(episodes=args.episodes,
-          grid_size=args.grid_size,
-          obstacle_prob=args.obstacle_prob,
-          render_every=args.render_every,
-          save_frames=args.save_frames,
-          seed=args.seed)
