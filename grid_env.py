@@ -28,7 +28,9 @@ class ComplexGridEnv:
         self.connectivity_tries = connectivity_tries
         self._fig = None
         self._ax = None
-        self.prev_positions = deque(maxlen=5)  # Track the last 5 positions to detect oscillations
+        # ANTI-OSCILLATION FIX: Track more positions to detect stuck behavior
+        self.prev_positions = deque(maxlen=10)  # Increased from 5 to 10 for better detection
+        self.position_counts = {}  # Count visits to each position
         self.reset()
 
     # ----------------------
@@ -89,6 +91,8 @@ class ComplexGridEnv:
         self.steps = 0
         self.done = False
         self._prev_dist = self._manhattan(self.agent, self.goal)
+        self.prev_positions.clear()  # Clear oscillation tracking
+        self.position_counts.clear()  # Clear visit counts
         return self._get_obs()
 
     # ----------------------
@@ -166,8 +170,8 @@ class ComplexGridEnv:
         reward = -0.05  # small time penalty
         done = False
         if action == 4:
-            # stay
-            pass
+            # ANTI-OSCILLATION FIX: Extra penalty for staying in place
+            reward -= 0.5  # Discourage staying action
         else:
             dx,dy = ComplexGridEnv.HEADINGS[action]
             new = (self.agent[0]+dx, self.agent[1]+dy)
@@ -177,9 +181,20 @@ class ComplexGridEnv:
             else:
                 self.agent = new
 
-        # Oscillation penalty: penalize if the agent revisits the same position repeatedly
+        # ANTI-OSCILLATION FIX: Strong penalties for oscillating and getting stuck
+        # Track position visits
+        self.position_counts[self.agent] = self.position_counts.get(self.agent, 0) + 1
+        
+        # Escalating penalty for revisiting positions
         if self.agent in self.prev_positions:
-            reward -= 0.5  # Penalty for oscillating
+            # Count how many times this position appears in recent history
+            recent_visits = list(self.prev_positions).count(self.agent)
+            reward -= 2.0 * (1 + recent_visits)  # Escalating penalty: -2, -4, -6, etc.
+        
+        # Additional penalty if stuck in small area (visiting same position too often)
+        if self.position_counts[self.agent] > 3:
+            reward -= 1.5 * (self.position_counts[self.agent] - 3)  # Extra penalty for repeated visits
+        
         self.prev_positions.append(self.agent)
 
         # goal check

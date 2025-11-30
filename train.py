@@ -157,8 +157,12 @@ def train(config: Config = None, resume_from: str = None):
                 action = agent.act(state, epsilon)
                 next_state, reward, done, _ = env.step(action)
                 
-                # Store transition
-                agent.store(state, action, reward, next_state, done)
+                # STABILITY FIX: Clip rewards to reduce variance and prevent Q-value explosion
+                # This helps stabilize learning by bounding the range of TD targets
+                clipped_reward = np.clip(reward, config.reward.REWARD_CLIP_MIN, config.reward.REWARD_CLIP_MAX)
+                
+                # Store transition with clipped reward
+                agent.store(state, action, clipped_reward, next_state, done)
                 
                 # Train agent
                 loss = agent.train_step()
@@ -211,6 +215,17 @@ def train(config: Config = None, resume_from: str = None):
                 logger.info(f"  Success Rate (last 100): {stats['success_rate']:.1f}%")
                 logger.info(f"  Avg Loss (last 100):    {stats['avg_loss']:.4f}")
                 logger.info(f"  Epsilon: {epsilon:.3f}")
+                
+                # STABILITY FIX: Log Q-value statistics to detect divergence
+                q_stats = agent.get_q_stats(window=100)
+                if q_stats:
+                    logger.info(f"  Q-values (last 100): Mean={q_stats['q_mean']:.2f}, "
+                              f"Max={q_stats['q_max']:.2f}, Min={q_stats['q_min']:.2f}, "
+                              f"Std={q_stats['q_std']:.2f}")
+                    # Warning if Q-values are exploding
+                    if abs(q_stats['q_mean']) > 1000 or abs(q_stats['q_max']) > 5000:
+                        logger.warning("  ⚠️  Q-VALUES MAY BE DIVERGING! Consider reducing learning rate.")
+                
                 logger.info("-" * 60)
             
             # Evaluation

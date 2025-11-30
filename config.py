@@ -30,7 +30,12 @@ class RewardConfig:
     COLLISION_PENALTY = -1.0
     PROGRESS_BONUS = 0.5
     PROGRESS_PENALTY = -0.1
-    OSCILLATION_PENALTY = -0.5
+    OSCILLATION_PENALTY = -2.0  # ANTI-OSCILLATION FIX: Increased from -0.5 to strongly discourage revisiting positions
+    STUCK_PENALTY = -1.5  # NEW: Penalty for staying in same small area for too long
+    
+    # STABILITY FIX: Reward clipping to reduce variance and stabilize Q-learning
+    REWARD_CLIP_MIN = -10.0  # Prevents extreme negative rewards from destabilizing training
+    REWARD_CLIP_MAX = 25.0   # Prevents extreme positive rewards from causing Q-value explosion
 
 
 class DQNConfig:
@@ -40,18 +45,23 @@ class DQNConfig:
     USE_DUELING = True  # Use Dueling DQN architecture
     
     # Training
-    LEARNING_RATE = 5e-4
+    LEARNING_RATE = 1e-4  # STABILITY FIX: Reduced from 5e-4 to prevent Q-value divergence
     GAMMA = 0.99
-    BATCH_SIZE = 64
-    REPLAY_BUFFER_SIZE = 50000
-    MIN_REPLAY_SIZE = 1000
-    TARGET_UPDATE_FREQUENCY = 500
-    GRADIENT_CLIP = 10.0
+    BATCH_SIZE = 128  # STABILITY FIX: Increased from 64 for more stable gradient estimates
+    REPLAY_BUFFER_SIZE = 100000  # STABILITY FIX: Increased from 50k for better experience diversity
+    MIN_REPLAY_SIZE = 2000  # STABILITY FIX: Increased to ensure sufficient sampling diversity
+    TARGET_UPDATE_FREQUENCY = 1000  # STABILITY FIX: Increased from 500 to reduce overestimation bias
+    GRADIENT_CLIP = 10.0  # Already good - prevents exploding gradients
     
     # Exploration
+    # STABILITY FIX: Epsilon-greedy exploration schedule
+    # Formula: epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY) each episode
     EPSILON_START = 1.0
-    EPSILON_END = 0.05
-    EPSILON_DECAY = 0.995
+    EPSILON_END = 0.1  # STABILITY FIX: Increased from 0.05 to maintain exploration
+                       # Higher minimum prevents policy collapse from lack of exploration
+    EPSILON_DECAY = 0.9985  # STABILITY FIX: Slower decay from 0.995
+                            # Reaches ~0.37 after 500 eps, ~0.14 after 1000 eps
+                            # Prevents premature convergence to suboptimal policy
     
     # Device
     DEVICE = None  # None means auto-detect
