@@ -370,7 +370,7 @@ $$Q^\pi(s, a) = \mathbb{E}_\pi \left[ \sum_{t=0}^{\infty} \gamma^t r_t \mid s_0=
 
 The **optimal Q-function** satisfies the Bellman optimality equation:
 
-$$Q^*(s, a) = \mathbb{E}_{s'} \left[ r + \gamma \max_{a'} Q^*(s', a') \mid s, a \right]$$
+$$Q^{*}(s, a) = \mathbb{E}_{s'} \left[ r + \gamma \max_{a'} Q^{*}(s', a') \mid s, a \right]$$
 
 #### Neural Network Approximation
 
@@ -610,11 +610,11 @@ $$\nabla\theta \leftarrow \begin{cases}
 
 Gradually increase difficulty over training:
 
-$$\text{grid\_size}(t) = \text{base\_size} + \left\lfloor \frac{t}{T} \cdot 5 \right\rfloor$$
+$$\text{grid_size}(t) = \text{base_size} + \left\lfloor \frac{t}{T} \cdot 5 \right\rfloor$$
 
-$$\text{obstacle\_prob}(t) = \text{base\_prob} + \frac{t}{T} \cdot 0.1$$
+$$\text{obstacle_prob}(t) = \text{base_prob} + \frac{t}{T} \cdot 0.1$$
 
-$$\text{n\_moving}(t) = \text{base\_moving} + \left\lfloor \frac{t}{T} \cdot 3 \right\rfloor$$
+$$\text{n_moving}(t) = \text{base_moving} + \left\lfloor \frac{t}{T} \cdot 3 \right\rfloor$$
 
 where $t$ is current episode and $T$ is total episodes.
 
@@ -1036,15 +1036,3 @@ If you use this code in your research, please cite:
   url = {https://github.com/yourusername/RL_Project}
 }
 ```
-
-## 📄 License
-
-This project is open source and available under the MIT License.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📧 Contact
-
-For questions or issues, please open an issue on GitHub or contact [your email].
