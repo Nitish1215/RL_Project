@@ -102,18 +102,11 @@ RL_Project/
 ├── visualize_results.py             # Training visualization tools
 ├── requirements.txt                 # Python dependencies
 ├── README.md                        # This file
-├── STABILITY_IMPROVEMENTS.md        # Detailed stability fix documentation
-├── ANTI_OSCILLATION_FIXES.md        # Anti-oscillation system documentation
-├── QUICK_REFERENCE.md               # Quick reference guide
-├── models/                          # Saved model checkpoints
-│   ├── dqn_best.pt                 # Best performing model
-│   └── checkpoint_ep*.pt           # Training checkpoints
-├── logs/                            # Training logs
+├── logs/                            # Training logs (created during training)
 │   └── training.log                # Detailed training logs
-├── results/                         # Metrics and training curves
-│   ├── training_metrics.csv        # Episode-by-episode metrics
-│   └── training_curves.png         # Training visualization
-└── frames/                          # Rendered episode frames (optional)
+└── results/                         # Metrics and training curves (created during training)
+    ├── training_metrics.csv        # Episode-by-episode metrics
+    └── training_curves.png         # Training visualization
 ```
 
 ---
@@ -828,12 +821,12 @@ class TrainingConfig:
 
 ## 📊 Outputs & Results
 
-### Saved Models
+### Saved Models (Created During Training)
 - `models/dqn_best.pt` - Best model based on rolling average reward
 - `models/dqn_final.pt` - Final model after training completion
 - `models/checkpoint_epXXX.pt` - Periodic full checkpoints with complete training state
 
-### Metrics & Analysis
+### Metrics & Analysis (Created During Training)
 - `results/training_metrics.csv` - Episode-by-episode metrics (reward, length, success, loss, etc.)
 - `results/training_curves.png` - Auto-generated 4-panel training visualization
 - `results/detailed_training_analysis.png` - Comprehensive 9-panel analysis (from visualize_results.py)
@@ -1019,10 +1012,7 @@ grep "Success Rate" logs/training.log | tail -n 20
 
 ### Documentation References
 
-For detailed explanations:
-- **Stability fixes**: See `STABILITY_IMPROVEMENTS.md`
-- **Anti-oscillation**: See `ANTI_OSCILLATION_FIXES.md`
-- **Quick reference**: See `QUICK_REFERENCE.md`
+For more details, refer to the troubleshooting sections above.
 
 ## 📝 Citation
 
