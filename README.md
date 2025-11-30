@@ -611,7 +611,9 @@ $$\nabla\theta \leftarrow \begin{cases}
 Gradually increase difficulty over training:
 
 $$\text{grid\_size}(t) = \text{base\_size} + \left\lfloor \frac{t}{T} \cdot 5 \right\rfloor$$
+
 $$\text{obstacle\_prob}(t) = \text{base\_prob} + \frac{t}{T} \cdot 0.1$$
+
 $$\text{n\_moving}(t) = \text{base\_moving} + \left\lfloor \frac{t}{T} \cdot 3 \right\rfloor$$
 
 where $t$ is current episode and $T$ is total episodes.
